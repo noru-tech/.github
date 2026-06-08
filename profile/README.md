@@ -13,9 +13,7 @@ These repositories host Noru's open tooling, integrations, and examples. Org-wid
 contribution, security, and support policies live in this `.github` repository and apply
 across all of them.
 
-| Topic | Where |
-| --- | --- |
-| How to contribute | [CONTRIBUTING.md](https://github.com/noru-tech/.github/blob/main/CONTRIBUTING.md) |
-| Reporting a vulnerability | [SECURITY.md](https://github.com/noru-tech/.github/blob/main/SECURITY.md) |
-| Getting help | [SUPPORT.md](https://github.com/noru-tech/.github/blob/main/SUPPORT.md) |
-| Community standards | [CODE_OF_CONDUCT.md](https://github.com/noru-tech/.github/blob/main/CODE_OF_CONDUCT.md) |
+- **How to contribute** — [CONTRIBUTING.md](https://github.com/noru-tech/.github/blob/main/CONTRIBUTING.md)
+- **Reporting a vulnerability** — [SECURITY.md](https://github.com/noru-tech/.github/blob/main/SECURITY.md)
+- **Getting help** — [SUPPORT.md](https://github.com/noru-tech/.github/blob/main/SUPPORT.md)
+- **Community standards** — [CODE_OF_CONDUCT.md](https://github.com/noru-tech/.github/blob/main/CODE_OF_CONDUCT.md)
