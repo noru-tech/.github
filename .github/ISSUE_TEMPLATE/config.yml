@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 🔒 Report a security vulnerability
+    url: https://github.com/noru-tech/.github/blob/main/SECURITY.md
+    about: Please report security issues privately, not as public issues.
+  - name: 💬 Questions & support
+    url: https://github.com/noru-tech/.github/blob/main/SUPPORT.md
+    about: How to get help and ask questions.
+  - name: 🌐 Noru website
+    url: https://noru.tech
+    about: Learn more about agentic compliance with Noru.
