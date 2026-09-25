@@ -3,7 +3,7 @@
 **Continuous, agentic compliance.**
 
 Noru turns compliance from a project into a system. We continuously collect evidence,
-monitor controls, and keep you audit-ready across SOC 2, ISO 27001, GDPR, NIS2, and 25+
+monitor controls, and keep you audit-ready across SOC 2, ISO 27001, GDPR, NIS2, and 30+
 other frameworks — by syncing the tools you already use (AWS, GCP, Azure, GitHub, GitLab,
 Slack, Google Workspace, and more).
 
