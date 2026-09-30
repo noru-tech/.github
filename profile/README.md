@@ -1,19 +1,43 @@
 # Noru
 
-**Continuous, agentic compliance.**
+Open-source tools for compliance you can verify: change control for AI coding agents, privacy data
+maps from source code, and GRC checks that run in your repository and CI.
 
-Noru turns compliance from a project into a system. We continuously collect evidence,
-monitor controls, and keep you audit-ready across SOC 2, ISO 27001, GDPR, NIS2, and 30+
-other frameworks — by syncing the tools you already use (AWS, GCP, Azure, GitHub, GitLab,
-Slack, Google Workspace, and more).
+## Open-source tools
 
-## What you'll find here
+| Tool | What it is | Install |
+| --- | --- | --- |
+| [agent-change-control](https://github.com/noru-tech/agent-change-control) (`acc`) | Deterministic change control for code written by AI coding agents. Checks each change for independent human approval and emits SARIF and in-toto statements. | `brew install noru-tech/tap/acc` |
+| [fideslang-tools](https://github.com/noru-tech/fideslang-tools) (`fl`) | Rust CLI for Fideslang privacy taxonomies and Fides manifests. Browse, validate, merge, convert and graph data maps offline. | `brew install noru-tech/tap/fl` |
+| [noru-grc-engineering](https://github.com/noru-tech/noru-grc-engineering) | Last-mile GRC engineering plugins for Claude Code and Codex: AI inventory, privacy data maps, infrastructure checks and change control, recorded in Noru. | `/plugin marketplace add noru-tech/noru-grc-engineering` |
+| [compliance-assistant](https://github.com/noru-tech/compliance-assistant) | Claude Code and Codex plugin that guides SOC 2, ISO 27001 and other framework work through Noru's MCP server. For Noru customers. | `/plugin marketplace add noru-tech/compliance-assistant` |
 
-These repositories host Noru's open tooling, integrations, and examples. Org-wide
-contribution, security, and support policies live in this `.github` repository and apply
-across all of them.
+GitHub Actions, each usable on its own:
 
-- **How to contribute** — [CONTRIBUTING.md](https://github.com/noru-tech/.github/blob/main/CONTRIBUTING.md)
-- **Reporting a vulnerability** — [SECURITY.md](https://github.com/noru-tech/.github/blob/main/SECURITY.md)
-- **Getting help** — [SUPPORT.md](https://github.com/noru-tech/.github/blob/main/SUPPORT.md)
-- **Community standards** — [CODE_OF_CONDUCT.md](https://github.com/noru-tech/.github/blob/main/CODE_OF_CONDUCT.md)
+| Action | What it does on a pull request |
+| --- | --- |
+| [`noru-tech/agent-change-control`](https://github.com/noru-tech/agent-change-control/blob/main/docs/github-action.md) | Flags an agent-written change until a human independent of its author or operator approves the current head, with SARIF output. |
+| [`noru-tech/noru-ci-action`](https://github.com/noru-tech/noru-ci-action) | Re-checks a committed Noru compliance manifest and fails when it drifts from the code. Offline by default. |
+| [`noru-tech/noru-review-action`](https://github.com/noru-tech/noru-review-action) | Routes the diff to the affected Noru compliance checks and reports findings. Read-only. |
+| [`noru-tech/noru-enforce-action`](https://github.com/noru-tech/noru-enforce-action) | Makes committed compliance records a merge condition across every configured piece. |
+
+Every release binary carries a GitHub artifact attestation and a checksum, and the
+[Homebrew tap](https://github.com/noru-tech/homebrew-tap) installs those binaries pinned by
+SHA-256. To check a download yourself: `gh attestation verify <archive> --repo noru-tech/<repo>`.
+
+## About Noru
+
+[Noru](https://noru.tech) is a continuous compliance platform. It collects evidence, monitors
+controls and keeps teams audit-ready across SOC 2, ISO 27001, GDPR, NIS2 and other frameworks by
+syncing the tools they already use (AWS, GCP, Azure, GitHub, GitLab, Slack, Google Workspace and
+more). The tools above work without a Noru account unless their description says otherwise.
+
+## Contributing and security
+
+These policies apply to every repository in the organization unless a repository has its own.
+
+- [How to contribute](https://github.com/noru-tech/.github/blob/main/CONTRIBUTING.md)
+- [Reporting a vulnerability](https://github.com/noru-tech/.github/blob/main/SECURITY.md): use
+  the repository's **Security > Report a vulnerability** form for private reporting
+- [Getting help](https://github.com/noru-tech/.github/blob/main/SUPPORT.md)
+- [Code of conduct](https://github.com/noru-tech/.github/blob/main/CODE_OF_CONDUCT.md)
