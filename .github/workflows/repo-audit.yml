@@ -1,0 +1,41 @@
+# Weekly check of every public noru-tech repository against the open-source baseline.
+# Opens or updates one tracking issue ("Open-source baseline audit") in this repository and
+# closes it when every check passes. See scripts/repo-audit.
+name: repo-audit
+
+on:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays 06:17 UTC
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: repo-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Ensure the tracking label exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh label create repo-audit --repo "$GITHUB_REPOSITORY" --color d93f0b --description "Open-source baseline audit" 2>/dev/null || true
+      - name: Audit repositories
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        # The script exits 3 when a check fails; the issue carries that result, so the job
+        # fails only when the script itself errors.
+        run: |
+          set +e
+          python3 scripts/repo-audit --issue
+          status=$?
+          if [ "$status" -ne 0 ] && [ "$status" -ne 3 ]; then exit "$status"; fi
