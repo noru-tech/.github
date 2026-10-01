@@ -1,0 +1,407 @@
+#!/usr/bin/env python3
+"""Check every public noru-tech repository against the open-source baseline.
+
+Sections 2 and 3 of the distribution spec, as checks a script can run: the About panel, health
+files, release assets, README badges and install commands, OpenSSF Scorecard, and workflow
+action pinning. Standard library only.
+
+    scripts/repo-audit                      print a markdown table, exit 3 when a check fails
+    scripts/repo-audit --repo fideslang-tools
+    scripts/repo-audit --json               machine-readable results
+    scripts/repo-audit --issue              also open or update one tracking issue in
+                                            noru-tech/.github (needs GITHUB_TOKEN, issues: write)
+
+GITHUB_TOKEN (or GH_TOKEN) is optional for reading public data but avoids the 60 requests per
+hour unauthenticated limit.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import os
+import re
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass, field
+
+ORG = "noru-tech"
+API = "https://api.github.com"
+USER_AGENT = "noru-repo-audit"
+ISSUE_REPO = ".github"
+ISSUE_TITLE = "Open-source baseline audit"
+ISSUE_LABEL = "repo-audit"
+
+# Profiles decide which checks apply. A repository not listed here gets "tool".
+#   tool     code with releases: every check
+#   plugin   agent plugin package without binaries: no release asset checks
+#   mirror   generated GitHub Action mirror: About panel, LICENSE, SECURITY.md, pinning
+#   tap      Homebrew tap: About panel, LICENSE, README install lines
+#   meta     the org's .github repository: health files only
+PROFILES = {
+    "agent-change-control": "tool",
+    "fideslang-tools": "tool",
+    "noru-grc-engineering": "plugin",
+    "compliance-assistant": "plugin",
+    "noru-ci-action": "mirror",
+    "noru-review-action": "mirror",
+    "noru-enforce-action": "mirror",
+    "homebrew-tap": "tap",
+    ".github": "meta",
+}
+CITATION_REQUIRED = {"agent-change-control", "fideslang-tools", "noru-grc-engineering"}
+
+HEALTH_FILES = {
+    "tool": [
+        "LICENSE", "SECURITY.md", "CHANGELOG.md", ".github/dependabot.yml",
+        ".github/ISSUE_TEMPLATE/bug_report.yml", ".github/ISSUE_TEMPLATE/feature_request.yml",
+        ".github/PULL_REQUEST_TEMPLATE.md", ".github/CODEOWNERS",
+    ],
+    "mirror": ["LICENSE", "SECURITY.md"],
+    "tap": ["LICENSE", "README.md"],
+    "meta": ["SECURITY.md", "CONTRIBUTING.md", "CODE_OF_CONDUCT.md", "SUPPORT.md", "profile/README.md"],
+}
+HEALTH_FILES["plugin"] = HEALTH_FILES["tool"]
+
+# Alternative spellings GitHub accepts for the same file.
+ALTERNATIVES = {
+    ".github/PULL_REQUEST_TEMPLATE.md": [".github/pull_request_template.md", "PULL_REQUEST_TEMPLATE.md", "docs/pull_request_template.md"],
+    ".github/CODEOWNERS": ["CODEOWNERS", "docs/CODEOWNERS"],
+    "LICENSE": ["LICENSE.md", "LICENSE.txt"],
+    ".github/dependabot.yml": [".github/dependabot.yaml"],
+    ".github/ISSUE_TEMPLATE/bug_report.yml": [".github/ISSUE_TEMPLATE/bug_report.yaml", ".github/ISSUE_TEMPLATE/bug-report.yml"],
+    ".github/ISSUE_TEMPLATE/feature_request.yml": [".github/ISSUE_TEMPLATE/feature_request.yaml", ".github/ISSUE_TEMPLATE/feature-request.yml"],
+}
+
+MIN_TOPICS, MAX_TOPICS = 12, 20
+MAX_DESCRIPTION = 160
+MIN_SCORECARD = 8.0
+EM_DASH = "—"
+# Shields and other badge services answer 200 with an error badge; these words mean "broken".
+BROKEN_BADGE = re.compile(
+    r"(not found|invalid|inaccessible|no releases|repo not found|unknown|error|no status|"
+    r"no longer available|deprecated)", re.I)
+SHA_REF = re.compile(r"^[0-9a-f]{40}$")
+
+
+@dataclass
+class Result:
+    repo: str
+    check: str
+    ok: bool
+    detail: str = ""
+
+
+@dataclass
+class Audit:
+    token: str | None
+    results: list[Result] = field(default_factory=list)
+    last_error: str = ""
+
+    # -- HTTP ------------------------------------------------------------------------------------
+
+    def get(self, url: str, *, accept: str = "application/vnd.github+json", auth: bool = True,
+            method: str = "GET", body: dict | None = None) -> tuple[int, bytes, dict]:
+        headers = {"User-Agent": USER_AGENT, "Accept": accept}
+        if auth and self.token and url.startswith(API):
+            headers["Authorization"] = f"Bearer {self.token}"
+            headers["X-GitHub-Api-Version"] = "2022-11-28"
+        data = None
+        if body is not None:
+            data = json.dumps(body).encode()
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return resp.status, resp.read(), dict(resp.headers)
+        except urllib.error.HTTPError as e:
+            return e.code, e.read(), dict(e.headers or {})
+        except (urllib.error.URLError, TimeoutError) as e:
+            return 0, str(e).encode(), {}
+
+    def api(self, path: str, **kw):
+        status, body, _ = self.get(f"{API}{path}", **kw)
+        if status == 0 or status >= 400:
+            try:
+                self.last_error = json.loads(body).get("message", "")
+            except (ValueError, AttributeError):
+                self.last_error = body[:200].decode("utf-8", "replace")
+            return status, None
+        return status, json.loads(body) if body else None
+
+    def graphql(self, query: str, variables: dict):
+        if not self.token:
+            return None
+        status, body, _ = self.get(f"{API}/graphql", method="POST",
+                                   body={"query": query, "variables": variables})
+        if status != 200:
+            return None
+        return json.loads(body).get("data")
+
+    def file(self, repo: str, path: str) -> str | None:
+        status, data = self.api(f"/repos/{ORG}/{repo}/contents/{urllib.parse.quote(path)}")
+        if status != 200 or not isinstance(data, dict) or "content" not in data:
+            return None
+        return base64.b64decode(data["content"]).decode("utf-8", "replace")
+
+    def exists(self, repo: str, path: str) -> bool:
+        status, _ = self.api(f"/repos/{ORG}/{repo}/contents/{urllib.parse.quote(path)}")
+        return status == 200
+
+    def add(self, repo: str, check: str, ok: bool, detail: str = "") -> None:
+        self.results.append(Result(repo, check, ok, detail))
+
+    # -- Checks ----------------------------------------------------------------------------------
+
+    def about(self, meta: dict) -> None:
+        repo = meta["name"]
+        desc = meta.get("description") or ""
+        problems = []
+        if not desc:
+            problems.append("missing")
+        if len(desc) >= MAX_DESCRIPTION:
+            problems.append(f"{len(desc)} chars, limit {MAX_DESCRIPTION - 1}")
+        if EM_DASH in desc:
+            problems.append("contains an em dash")
+        self.add(repo, "description", not problems, "; ".join(problems) or f"{len(desc)} chars")
+
+        topics = meta.get("topics") or []
+        self.add(repo, "topics", MIN_TOPICS <= len(topics) <= MAX_TOPICS,
+                 f"{len(topics)} topics, want {MIN_TOPICS}-{MAX_TOPICS}")
+
+        homepage = meta.get("homepage") or ""
+        self.add(repo, "homepage", bool(homepage), homepage or "missing")
+
+        data = self.graphql(
+            "query($o:String!,$n:String!){repository(owner:$o,name:$n){usesCustomOpenGraphImage}}",
+            {"o": ORG, "n": repo})
+        if data is None:
+            self.add(repo, "social preview", False, "not checked: needs GITHUB_TOKEN for GraphQL")
+        else:
+            custom = bool(data["repository"]["usesCustomOpenGraphImage"])
+            self.add(repo, "social preview", custom, "custom image" if custom else "GitHub default")
+
+        unused = [t for t, on in (("wiki", meta.get("has_wiki")), ("projects", meta.get("has_projects"))) if on]
+        self.add(repo, "unused tabs off", not unused, ", ".join(unused) + " enabled" if unused else "")
+
+    def health(self, repo: str, profile: str) -> None:
+        wanted = list(HEALTH_FILES[profile])
+        if repo in CITATION_REQUIRED:
+            wanted.append("CITATION.cff")
+        missing = [p for p in wanted
+                   if not self.exists(repo, p) and not any(self.exists(repo, a) for a in ALTERNATIVES.get(p, []))]
+        self.add(repo, "health files", not missing, "missing: " + ", ".join(missing) if missing else f"{len(wanted)} present")
+
+    def release(self, repo: str) -> None:
+        status, rel = self.api(f"/repos/{ORG}/{repo}/releases/latest")
+        if status != 200 or not rel:
+            self.add(repo, "release assets", False, "no published release")
+            return
+        assets = rel.get("assets") or []
+        names = [a["name"] for a in assets]
+        binaries = [a for a in assets if re.search(r"\.(tar\.xz|tar\.gz|zip|tgz)$", a["name"])]
+        checksums = any(re.search(r"(\.sha256$|sha256\.sum|checksums?\.txt|SHA256SUMS)", n, re.I) for n in names)
+        sbom = any(re.search(r"(cdx|cyclonedx|sbom|spdx)", n, re.I) for n in names)
+        attested = None
+        if binaries:
+            digest = binaries[0].get("digest")  # "sha256:<hex>", set by GitHub on upload
+            if digest:
+                st, att = self.api(f"/repos/{ORG}/{repo}/attestations/{digest}")
+                attested = st == 200 and bool((att or {}).get("attestations"))
+        problems = []
+        if not binaries:
+            problems.append("no binary archives")
+        if not checksums:
+            problems.append("no checksums")
+        if attested is False:
+            problems.append("no attestation for " + binaries[0]["name"])
+        if attested is None and binaries:
+            problems.append("attestation not checked (asset has no digest)")
+        if not sbom:
+            problems.append("no SBOM")
+        self.add(repo, f"release {rel['tag_name']}", not problems, "; ".join(problems) or "checksums, attestation, SBOM")
+
+    def readme(self, repo: str, profile: str) -> None:
+        text = self.file(repo, "README.md")
+        if text is None:
+            self.add(repo, "README", False, "missing")
+            return
+        visible = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+
+        badges = re.findall(r"!\[[^\]]*\]\((https?://[^)\s]+)\)", visible)
+        badges += re.findall(r'<img[^>]+src="(https?://[^"]+)"', visible)
+        badges = [b for b in badges if not re.search(r"raw\.githubusercontent\.com|/assets/|\.png$|\.jpe?g$|\.gif$", b)]
+        broken = []
+        for url in dict.fromkeys(badges):
+            status, body, headers = self.get(url, accept="image/svg+xml,image/*", auth=False)
+            ctype = headers.get("Content-Type", headers.get("content-type", ""))
+            svg_text = " ".join(re.findall(r"<text[^>]*>([^<]*)</text>", body.decode("utf-8", "replace"))) if "svg" in ctype else ""
+            if status != 200 or not ctype.startswith("image/") or (svg_text and BROKEN_BADGE.search(svg_text)):
+                why = "unreachable" if status == 0 else str(status)
+                broken.append(f"{url} ({why}{', ' + svg_text.strip()[:40] if svg_text else ''})")
+        self.add(repo, "README badges", not broken,
+                 "broken: " + "; ".join(broken) if broken else f"{len(badges)} resolve")
+
+        missing = []
+        for crate in dict.fromkeys(re.findall(r"cargo (?:b?install|binstall)\s+(?:--[\w-]+\s+)*([A-Za-z0-9_-]+)", visible)):
+            status, _, _ = self.get(f"https://crates.io/api/v1/crates/{crate}", accept="application/json", auth=False)
+            if status != 200:
+                missing.append(f"crates.io/{crate}")
+        for formula in re.findall(rf"brew install {ORG}/tap/([A-Za-z0-9_@.-]+)", visible):
+            if not self.exists("homebrew-tap", f"Formula/{formula}.rb"):
+                missing.append(f"{ORG}/tap/{formula}")
+        for pkg in re.findall(r"npm (?:i|install)\s+(?:-g\s+)?(@?[\w./-]+)", visible):
+            status, _, _ = self.get(f"https://registry.npmjs.org/{urllib.parse.quote(pkg, safe='@')}", accept="application/json", auth=False)
+            if status != 200:
+                missing.append(f"npm/{pkg}")
+        for pkg in re.findall(r"pipx? install\s+([A-Za-z0-9_.-]+)", visible):
+            status, _, _ = self.get(f"https://pypi.org/pypi/{pkg}/json", accept="application/json", auth=False)
+            if status != 200:
+                missing.append(f"pypi/{pkg}")
+        self.add(repo, "install commands", not missing,
+                 "package not found: " + ", ".join(missing) if missing else "all packages exist")
+
+        # A real installer pipes a URL into a shell; prose such as "no `curl | sh`" has no URL.
+        if re.search(r"curl\s[^\n|`]*https?://[^\n|`]*\|\s*(sudo\s+)?(ba|z)?sh\b", visible):
+            self.add(repo, "no piped installer", False, "README advertises a curl | sh installer")
+
+    def scorecard(self, repo: str) -> None:
+        status, body, _ = self.get(f"https://api.scorecard.dev/projects/github.com/{ORG}/{repo}",
+                                   accept="application/json", auth=False)
+        if status != 200:
+            why = "api.scorecard.dev unreachable" if status == 0 else "no published Scorecard result"
+            self.add(repo, "scorecard", False, why)
+            return
+        data = json.loads(body)
+        score = float(data.get("score", 0))
+        low = sorted((c for c in data.get("checks", []) if 0 <= c.get("score", -1) < 8),
+                     key=lambda c: c["score"])[:4]
+        detail = f"{score:.1f}"
+        if score < MIN_SCORECARD and low:
+            detail += " (lowest: " + ", ".join(f"{c['name']} {c['score']}" for c in low) + ")"
+        self.add(repo, "scorecard", score >= MIN_SCORECARD, detail)
+
+    def pinning(self, repo: str) -> None:
+        status, entries = self.api(f"/repos/{ORG}/{repo}/contents/.github/workflows")
+        paths = [e["path"] for e in entries or [] if e["name"].endswith((".yml", ".yaml"))] if status == 200 else []
+        for extra in ("action.yml", "action.yaml"):
+            if self.exists(repo, extra):
+                paths.append(extra)
+        unpinned = []
+        for path in paths:
+            text = self.file(repo, path) or ""
+            for ref in re.findall(r"^\s*-?\s*uses:\s*['\"]?([^'\"\s#]+)", text, re.M):
+                if ref.startswith(("./", "docker://")) or "@" not in ref:
+                    continue
+                action, version = ref.rsplit("@", 1)
+                if action.startswith(f"{ORG}/{repo}"):
+                    continue  # the repository's own action, tested at its own ref
+                if not SHA_REF.match(version):
+                    unpinned.append(f"{path}: {ref}")
+        self.add(repo, "actions pinned to SHAs", not unpinned,
+                 "; ".join(unpinned[:5]) + (f" (+{len(unpinned) - 5} more)" if len(unpinned) > 5 else "")
+                 if unpinned else f"{len(paths)} files checked")
+
+    # -- Driver ----------------------------------------------------------------------------------
+
+    def run(self, only: list[str]) -> None:
+        repos, page = [], 1
+        for name in only:
+            status, meta = self.api(f"/repos/{ORG}/{name}")
+            if status != 200:
+                sys.exit(f"cannot read {ORG}/{name} (HTTP {status})")
+            repos.append(meta)
+        while not only:
+            status, batch = self.api(f"/orgs/{ORG}/repos?type=public&per_page=100&page={page}")
+            if status != 200:
+                sys.exit(f"cannot list {ORG} repositories (HTTP {status})")
+            repos += batch
+            if len(batch) < 100:
+                break
+            page += 1
+        for meta in sorted(repos, key=lambda r: r["name"]):
+            repo = meta["name"]
+            if meta.get("archived") or meta.get("fork") or (only and repo not in only):
+                continue
+            profile = PROFILES.get(repo, "tool")
+            if profile != "meta":
+                self.about(meta)
+            self.health(repo, profile)
+            if profile == "tool":
+                self.release(repo)
+            if profile in ("tool", "plugin", "tap"):
+                self.readme(repo, profile)
+            if profile in ("tool", "plugin"):
+                self.scorecard(repo)
+            if profile in ("tool", "plugin", "mirror"):
+                self.pinning(repo)
+
+    def table(self) -> str:
+        failed = [r for r in self.results if not r.ok]
+        lines = [f"**{len(self.results) - len(failed)} of {len(self.results)} checks pass.**", "",
+                 "| Repository | Check | Result | Detail |", "| --- | --- | --- | --- |"]
+        for r in sorted(self.results, key=lambda r: (r.ok, r.repo, r.check)):
+            detail = r.detail.replace("|", "\\|")
+            lines.append(f"| {r.repo} | {r.check} | {'pass' if r.ok else '**FAIL**'} | {detail} |")
+        return "\n".join(lines)
+
+    def issue(self, report: str) -> None:
+        if not self.token:
+            sys.exit("--issue needs GITHUB_TOKEN")
+        run_url = ""
+        if os.environ.get("GITHUB_RUN_ID"):
+            run_url = f"\n\nLatest run: {os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+        body = ("Weekly check of every public repository against the open-source baseline "
+                "(`scripts/repo-audit`). This issue is updated in place and closed when every check passes."
+                f"{run_url}\n\n{report}\n")
+        failing = any(not r.ok for r in self.results)
+        base = f"/repos/{ORG}/{ISSUE_REPO}/issues"
+        # List by label rather than the search API, whose index lags behind new issues.
+        status, found = self.api(f"{base}?labels={ISSUE_LABEL}&state=all&per_page=100")
+        if status != 200:
+            sys.exit(f"cannot list issues in {ORG}/{ISSUE_REPO} (HTTP {status}): {self.last_error}")
+        existing = next((i for i in found or [] if i["title"] == ISSUE_TITLE and "pull_request" not in i), None)
+        if existing:
+            state = "open" if failing else "closed"
+            status, _ = self.api(f"{base}/{existing['number']}", method="PATCH", body={"body": body, "state": state})
+            if status != 200:
+                sys.exit(f"cannot update {existing['html_url']} (HTTP {status}): {self.last_error}")
+            print(f"updated {existing['html_url']} ({state})")
+        elif failing:
+            status, created = self.api(base, method="POST", body={"title": ISSUE_TITLE, "body": body, "labels": [ISSUE_LABEL]})
+            if status != 201 or not created:
+                sys.exit(f"cannot open the tracking issue in {ORG}/{ISSUE_REPO} (HTTP {status}): {self.last_error}")
+            print(f"opened {created['html_url']}")
+        else:
+            print("every check passes; no tracking issue needed")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--repo", action="append", default=[], help="audit only this repository (repeatable)")
+    parser.add_argument("--json", action="store_true", help="print results as JSON")
+    parser.add_argument("--issue", action="store_true", help="open or update the tracking issue")
+    args = parser.parse_args()
+
+    audit = Audit(token=os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN"))
+    audit.run(args.repo)
+    if args.json:
+        print(json.dumps([r.__dict__ for r in audit.results], indent=2))
+    else:
+        report = audit.table()
+        print(report)
+        summary = os.environ.get("GITHUB_STEP_SUMMARY")
+        if summary:
+            with open(summary, "a", encoding="utf-8") as f:
+                f.write(report + "\n")
+        if args.issue:
+            audit.issue(report)
+    # 3, not 1: a Python crash also exits 1, and the workflow must tell the two apart.
+    return 3 if any(not r.ok for r in audit.results) else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
