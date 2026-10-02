@@ -123,7 +123,7 @@ class Audit:
                 return resp.status, resp.read(), dict(resp.headers)
         except urllib.error.HTTPError as e:
             return e.code, e.read(), dict(e.headers or {})
-        except (urllib.error.URLError, TimeoutError) as e:
+        except OSError as e:  # URLError, and read timeouts (socket.timeout before Python 3.10)
             return 0, str(e).encode(), {}
 
     def api(self, path: str, **kw):
