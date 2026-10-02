@@ -40,19 +40,22 @@ ISSUE_LABEL = "repo-audit"
 #   plugin   agent plugin package without binaries: no release asset checks
 #   mirror   generated GitHub Action mirror: About panel, LICENSE, SECURITY.md, pinning
 #   tap      Homebrew tap: About panel, LICENSE, README install lines
+#   demo     example repository without releases: About panel, LICENSE, README, Scorecard, pinning
 #   meta     the org's .github repository: health files only
 PROFILES = {
     "agent-change-control": "tool",
     "fideslang-tools": "tool",
+    "privacy-flow": "tool",
     "noru-grc-engineering": "plugin",
     "compliance-assistant": "plugin",
     "noru-ci-action": "mirror",
     "noru-review-action": "mirror",
     "noru-enforce-action": "mirror",
     "homebrew-tap": "tap",
+    "agent-change-control-demo": "demo",
     ".github": "meta",
 }
-CITATION_REQUIRED = {"agent-change-control", "fideslang-tools", "noru-grc-engineering"}
+CITATION_REQUIRED = {"agent-change-control", "fideslang-tools", "noru-grc-engineering", "privacy-flow"}
 
 HEALTH_FILES = {
     "tool": [
@@ -62,6 +65,7 @@ HEALTH_FILES = {
     ],
     "mirror": ["LICENSE", "SECURITY.md"],
     "tap": ["LICENSE", "README.md"],
+    "demo": ["LICENSE", "README.md"],
     "meta": ["SECURITY.md", "CONTRIBUTING.md", "CODE_OF_CONDUCT.md", "SUPPORT.md", "profile/README.md"],
 }
 HEALTH_FILES["plugin"] = HEALTH_FILES["tool"]
@@ -332,11 +336,11 @@ class Audit:
             self.health(repo, profile)
             if profile == "tool":
                 self.release(repo)
-            if profile in ("tool", "plugin", "tap"):
+            if profile in ("tool", "plugin", "tap", "demo"):
                 self.readme(repo, profile)
-            if profile in ("tool", "plugin"):
+            if profile in ("tool", "plugin", "demo"):
                 self.scorecard(repo)
-            if profile in ("tool", "plugin", "mirror"):
+            if profile in ("tool", "plugin", "mirror", "demo"):
                 self.pinning(repo)
 
     def table(self) -> str:
